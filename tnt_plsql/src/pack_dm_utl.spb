@@ -1,0 +1,1607 @@
+/*
+
+    File: utlbody.sql
+  Author: Tony Obermeit
+    Date: 22nd July, 1994
+
+NOTE!  Now only works with 7.1 or higher databases.  Refer to the comments
+under edit history for version 1.0k!
+
+Please pass all comments regarding this procedure to Tony Obermeit at 
+tony@tamborine.to (+61 410 478 954)
+
+The source code for these procedures is public domain and was written by
+Tony Lee Obermeit and as such are Copyright (c) 1994-2025. You may modify 
+the procedures as needed provided you include this paragraph in all files 
+associated with the procedures.
+
+Edit History:
+
+v1.0u   12th November, 2025, Tony Lee Obermeit, moved into github
+
+v1.0t   4th March, 2002, Tony Lee Obermeit, moved into pvcs tree for tdm
+
+v1.0s   7th September, 2001, Tony Lee Obermeit
+        Now sorts table columns by column_id
+
+v1.0r   31st August, 1998, Tony Lee Obermeit
+    Added description of package procedures,
+    This is really nifty!  If you run dt,dtl or dtls against a package,
+    it will output the names of the procedures in the package
+
+v1.0q   19th November, 1997, Tony Lee Obermeit
+    Added printout of column defaults to dtl and dtls.  This only displays the first 48
+    characters of default values, if the default value is more than 32k, it will crash
+    (I think) because the pl/sql long is only 32k compared to the database value of 2gb.
+    Not worried about this as I think it is unlikely to occur.
+
+v1.0p   13th November, 1997, Tony Lee Obermeit
+    Minor cosmetic bug fix, skipped 1.0o to keep version decent, ordering of columns
+    in the index description was not by position.
+
+v1.0n   24th October, 1997, Tony Lee Obermeit
+    Fixed bug in synonym resolution.  When a private synonym or table
+    was being described for which a public synonym existed of the same
+    name, the synonym would always be resolved to the public synonym
+    name.
+
+v1.0m   17th October, 1997, Tony Lee Obermeit
+    added new procedure, dtls, which is same as dtl but also has statistics on tables.
+    The statistics are Number of blocks, empty blocks, number rows,
+    chained rows, avg row length & avg free space.
+    NOTE: Took out "BETA" classification!
+
+v1.0l   30th August, 1996, Tony Lee Obermeit
+        Bug fix, if combination of username and tablename was more than
+        30 characters it  failed with pl/sql value error.  Variable
+        g_table_name was expanded to 61 characters because this variable
+        momentarily holds combination of username and tablename.
+
+v1.0k   14th May, 1996, Tony Lee Obermeit
+        Describe long now shows storage parameters as requested by
+        Christina Hansson.
+
+        PLEASE NOTE!!!  Starting with version 1.0k, the system expects the
+        database to be at Version 7.1 or higher.  In 7.1 the data dictionary
+        returns values in bytes that used to be in blocks.  If you run
+        this against a 7.0 database, the values for next extent will be
+        reported incorrectly.  If you want to run this against a v7 database,
+        simply comment out the call to the dt_table_storage procedure.
+
+v1.0j   11th April, 1996, Tony Lee Obermeit
+        Now will not output details of not null constraints in constraints
+        section.
+
+v1.0i   21st March, 1995, Tony Lee Obermeit
+    Changed Size reporting to report in K, not bytes.
+
+v1.0h   20th January, 1995, Tony Lee Obermeit
+    Added option (dt_ref_tab) which details the tables referencing unique
+    and primary keys.
+
+v1.0g   18th January, 1995, Tony Lee Obermeit
+    Adding list of triggers to describe table long.  Also did a bit of
+    misc tidying up, the right hand columns needed to go over one space
+    to the right in a number of cases.  A number of cursors were not closed.
+    An enhancement was made to the word wrap procedure in that carriage
+    returns are now converted to spaces before the word wrap is processed.
+    This fixed cosmetic problems when carriage returns were found in
+    comments or other textual columns.
+
+v1.0f   14th November, 1994
+    Modified to handle description of non table objects.
+
+v1.0e   11th November, 1994
+    Modified to output warning if the object does not exist, this is
+    done by checking if any columns for the object are found.
+
+v1.0d   11th November, 1994
+    Very cosmetic bug fix.  When detailing foreign key constraints, the
+    "Deletes: " heading was positioned incorrectly.  Moved 1 char to the
+    right.
+
+v1.0c   26th October, 1994
+    Bug fix, the username passed with the syntax of username.table
+    was not being converted to uppercase.  Modified to convert
+    passed usernames to uppercase.  Look for comments v1.0c
+
+v1.0b   30th August, 1994
+    Changed footer, used to say SID:, now says Database:
+
+v1.0a   29th August, 1994
+    This was the first version ever released openly.  Beta
+
+Development Plan....
+
+Consider using the dependency tree utility to show all objects dependant
+on this object.
+
+Do Synonyms (Show all synonyms of this table)
+
+Do Cross References
+
+Rename package from utl to dba since it can access all tables.
+
+Also consider writing a procedure to do all output so that it
+can count lines and output formfeed or blank lines after x number of lines
+
+Consider changing code so that we can pass wild cards to this procedure
+to describe multiple tables and possibly even multiple users
+
+*/
+
+
+create or replace package body pack_dm_utl
+as
+-- Revision: $Revision$
+
+    -------------------------------
+    -- Private (Local) Variables --
+    -------------------------------
+
+        ppv_body_revision   pack_af_std.puv_spec_revision%type := 'v1.0u';
+
+/* Declare the private constructs */
+
+        g_table_name            varchar2(61);
+    g_user_name     varchar2(30);
+    g_object_type       varchar2(13);
+    g_synonym_to_resolve    boolean;
+    g_start_date        date;
+    g_object_exists     boolean;
+    g_debug_mode        boolean := false;
+
+        type g_desctabtyp is table of
+             varchar2(80)
+             index by binary_integer;
+
+    g_desc_tab g_desctabtyp;
+
+
+
+/* Declare the procedures */
+/*
+*   Module: FUNC_SPEC_REVISION
+*
+* Body Revision History
+* 1.0   06-Mar-1999 Tony Obermeit   Original Body Revision
+*/
+
+function
+    FUNC_SPEC_REVISION
+    return varchar2
+is
+begin
+
+    -- Return the value of the package variable
+
+        return(PACK_DM_DBMON.PUV_SPEC_REVISION);
+
+end     FUNC_SPEC_REVISION;
+
+
+
+/*
+*  Module: FUNC_BODY_REVISION
+*
+* Body Revision History
+* 1.0    06-Mar-1999    Tony Obermeit    Original Body Revision
+*/
+
+function
+    FUNC_BODY_REVISION
+    return varchar2
+is
+begin
+
+    -- Return the value of the body variable
+
+        return(PPV_BODY_REVISION);
+
+end     FUNC_BODY_REVISION;
+
+
+
+
+
+
+/* utl_out  Output Procedure */
+
+    procedure utl_out (p_text varchar)
+    is
+    begin
+        dbms_output.put('|'||rpad(p_text,78)||'|');
+        dbms_output.new_line;
+    end utl_out;
+
+
+
+/* utl_wrap Word Wrap Procedure */
+
+    procedure utl_wrap
+        (text_item varchar2,
+                 line_length number,
+                 elements out number)
+    as
+        loop_counter number := 0;
+        text_hold varchar2(80);
+        text_one varchar2(1);
+        cnt_pos number := 1;    -- Current position in string
+        cnt_tmp number;
+        cnt_1st number;
+    begin
+        loop
+            loop_counter := loop_counter + 1;  -- Array position
+
+            -- Get the next piece of the text.  We do this one char
+            -- at a time because we strip out carriage returns and
+            -- replace them with a space.  This was added as an
+            -- afterthought.  It is safe to do it here because the
+            -- array is only loaded from the text_hold string.  It
+            -- is also kept here so that the stripping of carriage
+            -- returns could be an optional parameter
+            text_hold := '';
+            for i in 1 .. length(substr(text_item,cnt_pos,
+                            line_length))
+            loop
+                text_one := substr(text_item,
+                           cnt_pos+i-1,1);
+                if ascii(text_one) = 10 then
+                   text_one := ' ';
+                end if;
+                text_hold := text_hold||text_one;
+            end loop;
+
+            -- Get out of the loop when we have the last piece
+            if length(substr(text_item,cnt_pos)) <= line_length then
+                g_desc_tab(loop_counter) := text_hold;
+                elements := loop_counter;
+                exit;
+            end if;
+
+            -- Check if the space after the piece we want is a
+            -- space, if so, take the text because we got lucky
+            -- enough to have a word on the exact text boundary
+            -- and then set up the pointer to get the piece
+            -- starting after the space
+            cnt_tmp := cnt_pos + line_length;
+            text_one := substr(text_item,cnt_tmp,1);
+            if text_one = ' ' then
+                g_desc_tab(loop_counter) := text_hold;
+                cnt_pos := cnt_tmp +1;
+            else
+                -- Here is where we have to count backwards to
+                -- find the space and word wrap
+                --
+                -- First test if there are in fact any spaces
+                -- in the piece we have, if not you will have
+                -- to split a word.
+                --
+                -- Get position of the first space
+                cnt_1st := instr(text_hold,' ');
+                if cnt_1st = 0 then
+                    g_desc_tab(loop_counter) := text_hold;
+                    cnt_pos := cnt_tmp;
+                else
+                  -- By now we must have some spaces in
+                  -- the line so we will have to wrap
+                  -- on a word boundary (a space).
+                  for cnt in reverse cnt_1st .. line_length
+                  loop
+                    if substr(text_hold,cnt,1) = ' ' then
+                      g_desc_tab(loop_counter) :=
+                          substr(text_hold,1,cnt);
+                      cnt_pos := cnt_pos + cnt;
+                      elements := loop_counter;
+                      exit;
+                    end if;
+                  end loop;
+                end if;
+            end if;
+        end loop;
+    end utl_wrap;
+
+
+
+/* utl_dash Output a line of dashes*/
+
+    procedure utl_dash
+    as
+       v_text varchar(80);
+    begin
+       -- All we do is output a line of dashes
+       v_text := '---------------------------------------';
+       v_text := v_text||'---------------------------------------';
+       utl_out(v_text);
+    end utl_dash;
+
+
+
+/* utl_ref_tab  Print the tables referenced by this key, primary or unique */
+
+    procedure utl_ref_tab (p_owner varchar2,
+                   p_constraint_name varchar2)
+    as
+        cursor ref (cp_r_owner varchar2,
+                cp_r_constraint_name varchar2)
+        is
+        select
+            dc.owner,
+            dc.table_name,
+            dc.delete_rule,
+            dc.status
+        from
+            sys.dba_constraints dc
+        where
+            dc.r_owner = cp_r_owner
+        and dc.r_constraint_name = cp_r_constraint_name;
+
+        status_text varchar2(4);
+
+    begin
+        -- Loop around retrieving the cursors rows
+        for rec in ref(p_owner, p_constraint_name)
+        loop
+            if rec.status = 'ENABLED' then
+                status_text := 'ON  ';
+            else
+                status_text := 'OFF ';
+            end if;
+            if ref%rowcount = 1 then
+                utl_out(lpad('Referenced by: ',20)||
+                    rpad(rec.owner||
+                    '.'||rec.table_name,33)
+                    ||' Status: '||
+                    status_text||'('||
+                    rec.delete_rule||')');
+            else
+                utl_out(lpad(' ',20)||
+                    rpad(rec.owner||
+                    '.'||rec.table_name,33)
+                    ||' Status: '||
+                    status_text||'('||
+                    rec.delete_rule||')');
+            end if;
+
+        end loop;
+
+    end utl_ref_tab;
+
+
+
+/* dt_object        Describe what type of object it is and if it exists
+            This procedure looks up dba_objects to determine what
+            the object is.  If it find the object, it reports that
+            otherwise it reports that the object doesn't exist */
+
+    procedure dt_object
+    is
+        cursor c_obj
+        is
+            select
+                ob.object_type
+            from
+                sys.dba_objects ob
+            where
+                ob.owner = g_user_name
+            and ob.object_name = g_table_name;
+        c_obj_rec   c_obj%rowtype;
+    begin
+        g_object_exists := FALSE;       -- Assume doesn't exist
+
+        open c_obj;
+
+        fetch c_obj into g_object_type;
+        if c_obj%notfound then
+            utl_out('             which: DOES NOT EXIST!');
+        end if;
+        if c_obj%found then
+            utl_out('        which is a: '||g_object_type);
+            g_object_exists := TRUE;
+        end if;
+
+        close c_obj;
+
+    end dt_object;
+
+
+
+/* dt_table_space   Report on tablespace location and size of an object */
+
+    procedure dt_table_space (p_owner    varchar,
+                  p_segment_name varchar,
+                  p_segment_type varchar)
+    as
+
+        cursor tab  (p_tab_owner        varchar,
+                 p_tab_table_name   varchar,
+                 p_tab_segment_type varchar)
+        is
+            select
+                ds.tablespace_name,
+                ds.bytes
+            from
+                sys.dba_segments ds
+            where
+                ds.owner = p_tab_owner
+            and ds.segment_name = p_tab_table_name
+            and ds.segment_type = p_tab_segment_type;
+        tab_rec tab%rowtype;
+    begin
+              open tab(p_owner,p_segment_name,p_segment_type);
+              fetch tab into tab_rec;
+              if tab%found then
+                  utl_out(rpad(lpad('Tablespace: ',20)||
+                  tab_rec.tablespace_name,55)||' Size: '||
+                  ltrim(to_char(tab_rec.bytes/1024,
+                      '99,999,999,999')||'K'));
+              end if;
+              close tab;
+
+    end dt_table_space;
+
+
+
+/* dt_table_storage     Report on table storage parameters*/
+
+        procedure dt_table_storage (p_owner        varchar,
+                                    p_segment_name varchar,
+                                    p_segment_type varchar)
+    as
+
+                cursor stor     (p_stor_owner            varchar,
+                                 p_stor_table_name       varchar,
+                                 p_stor_segment_type     varchar)
+        is
+            select
+                                ds.next_extent,
+                                ds.max_extents,
+                                ds.extents,
+                                ds.pct_increase
+            from
+                sys.dba_segments ds
+            where
+                                ds.owner = p_stor_owner
+                        and     ds.segment_name = p_stor_table_name
+                        and     ds.segment_type = p_stor_segment_type;
+                stor_rec stor%rowtype;
+    begin
+                      open stor(p_owner,p_segment_name,p_segment_type);
+                      fetch stor into stor_rec;
+                      if stor%found then
+                          utl_out(rpad(lpad('Next Extent: ',20)||
+                                  ltrim(to_char(stor_rec.next_extent/1024,
+                                  '99,999,999,999'))||'K',52)||' Extents: '||
+                                  ltrim(to_char(stor_rec.extents,
+                                          '99,999,999,999')));
+                          utl_out(rpad(lpad('Max Extents: '||
+                                  stor_rec.max_extents,23),48)||' Pctincrease: '||
+                                  ltrim(to_char(stor_rec.pct_increase,
+                                          '999,999,999')));
+              end if;
+                      close stor;
+
+        end dt_table_storage;
+
+
+
+/* dt_table_statistics     Report on table statistics, directly from dba_tables */
+
+        procedure dt_table_statistics (p_owner        varchar,
+                                       p_segment_name varchar)
+    as
+
+                cursor stat     (p_stat_owner            varchar,
+                                 p_stat_table_name       varchar)
+        is
+            select
+                                dt.num_rows,
+                                dt.chain_cnt,
+                                dt.blocks,
+                                dt.empty_blocks,
+                dt.avg_row_len,
+                dt.avg_space
+            from
+                sys.dba_tables dt
+            where
+                                dt.owner = p_stat_owner
+                        and     dt.table_name = p_stat_table_name;
+                stat_rec stat%rowtype;
+        left_label  varchar2(20);
+        left_data   varchar2(22);
+        right_label varchar2(20);
+        right_data  varchar2(16);
+        no_calcs    boolean;
+    begin
+                      open stat(p_owner,p_segment_name);
+                      fetch stat into stat_rec;
+                      if stat%found then
+             left_label  := 'Used Blocks: ';
+             right_label := 'Empty Blocks: ';
+             left_data  := ltrim(nvl(to_char(stat_rec.blocks,'99,999,999,999'),'Not Calculated'));
+             right_data := ltrim(nvl(to_char(stat_rec.empty_blocks,'99,999,999,999'),'Not Calculated'));
+             no_calcs := false;
+             if left_data = 'Not Calculated' then
+                no_calcs := true;
+             end if;
+             if no_calcs then
+                right_data := 'Not Calculated';
+             end if;
+             utl_out(lpad(left_label,20)||
+                 rpad(left_data,22)||
+                 lpad(right_label,20)||
+                 right_data);
+
+             left_label  := 'Number of Rows: ';
+             right_label := 'Chained Rows: ';
+             left_data  := ltrim(nvl(to_char(stat_rec.num_rows,'99,999,999,999'),'Not Calculated'));
+             right_data := ltrim(nvl(to_char(stat_rec.chain_cnt,'99,999,999,999'),'Not Calculated'));
+             if no_calcs then
+                left_data := 'Not Calculated';
+                right_data := 'Not Calculated';
+             end if;
+             utl_out(lpad(left_label,20)||
+                 rpad(left_data,22)||
+                 lpad(right_label,20)||
+                 right_data);
+
+             left_label  := 'Avg Row Length: ';
+             right_label := 'Avg Free Space: ';
+             left_data  := ltrim(nvl(to_char(stat_rec.avg_row_len,'99,999,999,999'),'Not Calculated'));
+             right_data := ltrim(nvl(to_char(stat_rec.avg_space,'99,999,999,999'),'Not Calculated'));
+             if no_calcs then
+                left_data := 'Not Calculated';
+                right_data := 'Not Calculated';
+             end if;
+             utl_out(lpad(left_label,20)||
+                 rpad(left_data,22)||
+                 lpad(right_label,20)||
+                 right_data);
+
+              end if;
+                      close stat;
+
+        end dt_table_statistics;
+
+
+
+/* dt_setup Setup variables for DT procedure */
+
+    procedure dt_setup (table_name varchar2)
+    as
+        dot_pos number;
+    begin
+        -- Save the time the procedure starts
+        --
+        g_start_date := sysdate;
+
+        -- Output the first line of the box which the entire dt output
+        -- will be formatted in.
+        --
+        dbms_output.put_line(chr(13));
+        dbms_output.put('.---------------------------------------');
+        dbms_output.put('---------------------------------------.');
+        dbms_output.new_line;
+
+        g_table_name := table_name;
+        g_user_name := upper(user);
+
+        -- If there is a dot in the table name, take what is left of
+        -- the dot as the user name and what is right as the table name
+        dot_pos := instr(g_table_name,'.');
+        if dot_pos <> 0 then
+            g_user_name := substr(g_table_name,1,dot_pos-1);
+            g_table_name := substr(g_table_name,dot_pos+1);
+
+            -- Bug Fix for v1.0c, Tony Lee Obermeit, 26th October,
+            -- 1994.  Next lines to "End of Bug..." fixed a bug
+            -- whereby the username was not being converted to
+            -- uppercase if it was passed with dot notation.  We
+            -- don't generically convert all usernames to upper
+            -- case in case the logged in username is in lower
+            -- case and we are looking for tables from that schema
+            -- Convert the username to uppercase provided it isn't
+            -- quoted.  If quoted remove the quotes.
+            if substr(g_user_name,1,1) <> '"' then
+                g_user_name := upper(g_user_name);
+            else
+                g_user_name := substr(g_user_name,2,
+                            length(g_user_name)-2);
+            end if;
+            -- End of Bug Fix for v1.0c
+
+        end if;
+
+        -- Now convert the table name to uppercase as long as it is
+        -- not a quoted table name.  If it is a quoted table name
+        -- then remove the quotes.
+        if substr(g_table_name,1,1) <> '"' then
+            g_table_name := upper(g_table_name);
+        else
+            g_table_name := substr(g_table_name,2,
+                        length(g_table_name)-2);
+        end if;
+
+    end dt_setup;
+
+
+
+/* dt_tab_comments  Output the table comments */
+
+    procedure dt_tab_comments
+    as
+        v_comments  varchar2(2000);
+        num_com_lines   number(4);
+    begin
+        -- Output the table comment if we have one
+        --
+        begin
+            select comments
+            into   v_comments
+            from   sys.dba_tab_comments
+            where  table_name = g_table_name
+            and    owner = g_user_name;
+
+            if length(v_comments) > 0 then
+            utl_wrap(v_comments,58,num_com_lines);
+            for i in 1 .. num_com_lines
+            loop
+                if i = 1 then
+                       utl_out(lpad('Comment: ',20)||g_desc_tab(i));
+                else
+                       utl_out(lpad(' ',20)||g_desc_tab(i));
+                end if;
+            end loop;
+            end if;
+
+        exception
+        when no_data_found then
+            null;
+        end;
+
+    end dt_tab_comments;
+
+
+
+/* dt_syn   Resolve synonyms */
+
+    procedure dt_syn
+    as
+        cursor syn (p_user  varchar,
+                p_table varchar)
+        is
+        select  table_owner,
+            table_name
+        from    sys.dba_synonyms
+        where   owner = p_user
+        and synonym_name = p_table;
+
+        syn_rec syn%rowtype;
+
+        cursor dtab (p_user  varchar,
+                p_table varchar)
+        is
+        select  owner,
+            table_name
+        from    sys.dba_tables
+        where   owner = p_user
+        and table_name = p_table;
+
+        dtab_rec    dtab%rowtype;
+
+        save_user   varchar(30);
+        save_table  varchar(30);
+        skip_public boolean;
+        syn_type    varchar(6);
+    begin
+        -- At the start of this procedure, we set a boolean to false
+        -- which says there are no synonyms to resolve.  If we
+        -- substitute any synonym, this boolean is set to true.  This
+        -- allows us to call this procedure in a loop until it
+        -- resolves no more synonyms
+        g_synonym_to_resolve := FALSE;
+        syn_type := 'Unknwn';   -- Should never be shown
+
+        -- We have the name of the user and the name of the table
+        -- to be described.  Now check that this table is in fact a
+        -- table and not a synonym.
+
+        save_user := g_user_name;
+        save_table := g_table_name;
+
+        if g_debug_mode then
+            utl_out('1st In. g_user_name: '||g_user_name||' g_table_name: '||g_table_name);
+        end if;
+
+        -- First check the private synonym
+        --
+        -- We use a flag (skip_public) which is the bug fix provided with v1.0n
+        -- This flag tells us whether we have a user and table combination which
+        -- can be resolved without going to a public synonym.  When we didn't do
+        -- the test against the table (dtab cursor), it would go to a public
+        -- synonym when there was a private table.
+        open syn(save_user,save_table);
+
+        skip_public := false;
+
+        fetch syn into syn_rec;
+        if syn%found then
+            g_user_name := syn_rec.table_owner;
+            g_table_name := syn_rec.table_name;
+            g_synonym_to_resolve := TRUE;
+            skip_public := true;
+            syn_type := 'Privat';
+            if g_debug_mode then
+                utl_out('Check Private. g_user_name: '||g_user_name||' g_table_name: '||g_table_name);
+            end if;
+        end if;
+        if syn%notfound then
+            open dtab(save_user,save_table);
+            fetch dtab into dtab_rec;
+            if dtab%found then
+                skip_public := true;
+                if g_debug_mode then
+                    utl_out('Found table.');
+                end if;
+            end if;
+            close dtab;
+        end if;
+
+        close syn;
+
+        -- Now check the public synonym but only if
+        -- we didn't get a private one
+        if not skip_public then
+            open syn('PUBLIC',save_table);
+
+            fetch syn into syn_rec;
+            if syn%found then
+                g_user_name := syn_rec.table_owner;
+                g_table_name := syn_rec.table_name;
+                syn_type := 'Public';
+                if g_debug_mode then
+                    utl_out('Check Public. g_user_name: '||g_user_name||' g_table_name: '||g_table_name);
+                end if;
+            end if;
+
+            close syn;
+        end if;
+
+        if  g_user_name <> save_user
+          or    g_table_name <> save_table then
+            utl_out(syn_type||' synonym for: '||g_user_name||
+                '.'||g_table_name);
+            g_synonym_to_resolve := TRUE;
+        end if;
+
+    end dt_syn;
+
+
+
+/* dt_head  Describe Table Header Procedure */
+
+    procedure dt_head
+    as
+    begin
+        -- Output the 1st heading and table name
+        --
+        utl_out('Object Description: '||
+            g_user_name||'.'||g_table_name);
+
+    end dt_head;
+
+
+
+/* dt_col   Describe Table Columns Procedure */
+
+    procedure dt_col
+    as
+        cursor col is
+            select
+                tc.column_name,
+                tc.data_type,
+                tc.nullable,
+                tc.data_length,
+                tc.data_precision,
+                tc.data_scale,
+                cc.comments
+            from
+                sys.dba_tab_columns tc,
+                sys.dba_col_comments cc
+            where
+                tc.owner = g_user_name
+            and tc.table_name = g_table_name
+            and tc.owner = cc.owner
+            and tc.column_name = cc.column_name
+            and tc.table_name = cc.table_name
+            order by tc.column_id;
+
+        col_rec col%rowtype;
+
+        col_data_type   varchar(20);
+        num_com_lines   number(4);
+        col_nullable    varchar(3);
+        com_text    varchar(28);
+    begin
+
+        utl_dash;               -- Output line of dashes
+
+        open col;
+
+        loop
+
+            -- Get the next column record
+            --
+            fetch col into col_rec;
+            exit when col%notfound;
+
+            -- If it is the first column, then first output the
+            -- headings and set a flag to say we have columns
+            --
+            if col%rowcount = 1 then
+                -- Output the headings for the table columns
+                --
+                utl_out('Column Name                   '||
+                'Datatype        '||
+                'Nul Comment                     ');
+                utl_dash;       -- Output line of dashes
+            end if;
+
+            -- Format the datatype column
+            --
+            col_data_type := col_rec.data_type;
+
+            -- Takes care of numeric data types
+            --
+            if col_rec.data_precision is not null then
+                col_data_type := col_data_type||'('||
+                    to_char(col_rec.data_precision);
+                if col_rec.data_scale > 0 then
+                    col_data_type:= col_data_type||
+                        ','||
+                        to_char(col_rec.data_scale);
+                end if;
+                col_data_type := col_data_type||')';
+            end if;
+
+            -- Takes care of char data type
+            --
+            if col_rec.data_type like '%CHAR%' then
+                col_data_type := col_data_type||'('||
+                    to_char(col_rec.data_length)||')';
+            end if;
+
+            -- Work out the nullable column
+            --
+            col_nullable := 'NO';
+            if col_rec.nullable = 'Y' then
+                col_nullable := '';
+            end if;
+
+            -- Get the comments into an array which is
+            -- word wrapped
+            --
+            if length(col_rec.comments) > 28 then
+                utl_wrap(col_rec.comments,28,num_com_lines);
+                if nvl(num_com_lines,0) > 0 then
+                    com_text := g_desc_tab(1);
+                end if;
+            else
+                num_com_lines := 1;
+                com_text := col_rec.comments;
+            end if;
+            -- Write out the column details
+            --
+            utl_out(rpad(col_rec.column_name,30)||
+                rpad(rpad(col_data_type,16)||col_nullable,20)||
+                com_text);
+
+            -- If there are additional lines of comments
+            -- output them
+            if nvl(num_com_lines,0) > 1 then
+                for i in 2 .. num_com_lines
+                loop
+                  utl_out(lpad(rpad(g_desc_tab(i),28),78));
+                end loop;
+            end if;
+        end loop;
+
+        close col;
+
+    end dt_col;
+
+
+
+/* dt_col_defaults  Describe Table Column Defaults Procedure */
+
+    procedure dt_col_defaults
+    as
+        cursor def is
+            select
+                tc.column_name,
+                tc.data_default
+            from
+                sys.dba_tab_columns tc
+            where
+                tc.owner = g_user_name
+            and tc.table_name = g_table_name
+            and tc.data_default is not null;
+
+    begin
+
+        -- This procedure loops around the def cursor.  It is retrieving the data_default
+        -- value for all columns in this table.
+
+        for def_rec in def loop
+
+            -- If it is the first column, then first output the
+            -- headings and set a flag to say we have columns
+            --
+            if def%rowcount = 1 then
+                -- Output the headings for the table columns
+                --
+                utl_dash;       -- Output line of dashes
+                utl_out('Column Name                   '||
+                    'Default Value (Used on inserts only)');
+                utl_dash;       -- Output line of dashes
+            end if;
+
+            -- We really only want the first 48 characters of the default, it
+            -- is stored in a database long but usually only has smallish values
+            -- may need to address this better in the future.
+
+            -- Write out the default details
+            --
+            utl_out(rpad(def_rec.column_name,30)||substr(def_rec.data_default,1,48));
+
+        end loop;
+
+    end dt_col_defaults;
+
+
+
+/* dt_foot  Describe Table Footer Procedure */
+
+    procedure dt_foot
+    as
+        cursor dbname
+        is
+        select  name,
+            banner
+        from    sys.v_$database,
+            sys.v_$version;
+
+        temp_text varchar2(78);
+        more_text varchar2(78);
+    begin
+        -- Work out the start and end times
+        temp_text := 'Start: '||
+                to_char(g_start_date,'DD-MON-YY HH:MI:SS');
+        temp_text := temp_text||' Finish: '||
+                to_char(sysdate,'HH:MI:SS');
+                temp_text := temp_text||'       Describe Table v1.0t';
+        utl_out(temp_text);
+
+        -- Print the database name and version
+        open dbname;
+        -- We only want the first row
+        fetch dbname into temp_text, more_text;
+        utl_out('Database: '||temp_text||' - '||more_text);
+
+        close dbname;
+
+        -- Print the last line of dashes
+        dbms_output.put('`---------------------------------------');
+        dbms_output.put('---------------------------------------''');
+        dbms_output.new_line;
+    end;
+
+
+
+/* dt_index Describe Table Indexes Procedure */
+
+    procedure dt_index
+    as
+        cursor ind is
+            select
+                di.index_name,
+                di.uniqueness,
+                di.owner
+            from
+                sys.dba_indexes di
+            where
+                di.table_owner = g_user_name
+            and di.table_name = g_table_name;
+
+        ind_rec ind%rowtype;
+
+        cursor indcol  (p_owner varchar,
+                p_name varchar)
+        is
+            select
+                ic.column_name,
+                ic.column_position
+            from
+                sys.dba_ind_columns ic
+            where
+                ic.index_owner = p_owner
+            and ic.index_name  = p_name
+            order by
+                ic.column_position;
+
+        indcol_rec indcol%rowtype;
+
+    begin
+
+    open ind;
+
+    loop
+        -- Get the next index record
+        --
+        fetch ind into ind_rec;
+        exit when ind%notfound;
+
+        -- Output headings if 1st record, otherwise print a blank line
+        if ind%rowcount = 1 then
+           utl_dash;                -- Output line of dashes
+           utl_out(rpad('Index Name',62)||'Uniqueness');
+           utl_dash;                -- Output line of dashes
+        else
+           utl_out(' ');
+        end if;
+
+        -- Write out the index details
+        --
+
+        -- Output the details about this index column
+        utl_out(rpad(ind_rec.owner||'.'||ind_rec.index_name,62)||
+            ind_rec.uniqueness);
+        dt_table_space(ind_rec.owner,ind_rec.index_name,'INDEX');
+
+        -- Now open and report on the columns for this index
+        open indcol(ind_rec.owner,ind_rec.index_name);
+
+        loop
+            fetch indcol into indcol_rec;
+            exit when indcol%notfound;
+
+            if indcol_rec.column_position = 1 then
+               utl_out(lpad('Column: ',20)||
+                rpad(indcol_rec.column_name,30)||
+                '  Position: '||
+                to_char(indcol_rec.column_position));
+            else
+               utl_out(lpad(' ',20)||
+                rpad(indcol_rec.column_name,30)||
+                '            '||
+                to_char(indcol_rec.column_position));
+            end if;
+
+        end loop;
+
+        close indcol;
+
+    end loop;
+
+    close ind;
+
+    end dt_index;
+
+
+
+/* dt_trigger   Describe the triggers for the table */
+
+    procedure dt_trigger
+    as
+        cursor trg is
+            select
+                tr.owner,
+                tr.trigger_name,
+                tr.trigger_type,
+                tr.triggering_event,
+                tr.status,
+                tr.when_clause
+            from
+                sys.dba_triggers tr
+            where   tr.table_owner = g_user_name
+            and tr.table_name = g_table_name;
+
+        trg_rec trg%rowtype;
+        num_trg_lines   number(4);
+
+    begin
+
+    open trg;
+
+    loop
+        -- Get the next trigger record
+        --
+        fetch trg into trg_rec;
+        exit when trg%notfound;
+
+        -- Output headings if 1st record, otherwise print a blank line
+        if trg%rowcount = 1 then
+           utl_dash;                -- Output line of dashes
+           utl_out(rpad('Trigger Name',62)||'Type');
+           utl_dash;                -- Output line of dashes
+        else
+           utl_out(' ');
+        end if;
+
+        -- Write out the trigger details
+        --
+
+        -- Output the details about this trigger
+        utl_out(rpad(trg_rec.owner||'.'||trg_rec.trigger_name,62)||
+            trg_rec.trigger_type);
+        utl_out(lpad('Event: ',20)||
+                rpad(trg_rec.triggering_event,30)||
+                '    Status: '||trg_rec.status);
+
+        -- If there is a when clause, then output with word wrap
+            if length(trg_rec.when_clause) > 0 then
+            utl_wrap(trg_rec.when_clause,58,num_trg_lines);
+            for i in 1 .. num_trg_lines
+            loop
+                if i = 1 then
+                       utl_out(lpad('When: ',20)||g_desc_tab(i));
+                else
+                       utl_out(lpad(' ',20)||g_desc_tab(i));
+                end if;
+            end loop;
+            end if;
+
+
+    end loop;
+
+    close trg;
+
+    end dt_trigger;
+
+
+
+/* dt_cons_cols Describe the constraint columns
+        We pass the owner, constraint_name and table_name and this
+        procedure prints out the columns and position       */
+
+    procedure dt_cons_cols
+        (p_owner        varchar,
+         p_constraint_name  varchar,
+         p_table_name       varchar)
+    as
+        cursor col (p_col_owner         varchar,
+                p_col_constraint_name   varchar,
+                p_col_table_name        varchar)
+        is
+            select
+                col.column_name,
+                col.position
+            from
+                sys.dba_cons_columns col
+            where
+                col.owner       = p_col_owner
+            and col.constraint_name = p_col_constraint_name
+            and col.table_name      = p_col_table_name
+            order by
+                col.position;
+
+        col_rec col%rowtype;
+
+    begin
+        -- Now open and report on the columns for this constraint
+        open col(p_owner,p_constraint_name,p_table_name);
+
+        loop
+            fetch col into col_rec;
+            exit when col%notfound;
+
+            if col_rec.position = 1 then
+               utl_out(lpad('Column: ',20)||
+                rpad(col_rec.column_name,30)||'  Position: '||
+                to_char(col_rec.position));
+            else
+               utl_out(lpad(' ',20)||
+                rpad(col_rec.column_name,30)||
+                '            '||
+                to_char(col_rec.position));
+            end if;
+
+        end loop;
+
+        close col;
+
+    end dt_cons_cols;
+
+
+
+/* dt_fk_ref    Describe the Primary Key referenced by the Foreign Key */
+
+    procedure dt_fk_ref(r_owner varchar,
+                r_constraint_name varchar)
+    as
+        -- This cursor is using parameters because I am restricting
+        -- based on the parameters passed to this procedure (r_owner,
+        -- and r_constraint_name).  I had referenced these passed
+        -- parameters directly in the cursor but it always retrieved
+        -- zero rows.  Interesting behaviour.
+        --
+        cursor con (con_owner varchar,
+                con_constraint_name varchar)
+        is
+            select
+                col.column_name,
+                col.table_name,
+                col.position
+            from
+                sys.dba_cons_columns col,
+                sys.dba_constraints con
+            where
+                col.owner = con_owner
+            and col.constraint_name = con_constraint_name
+            and con.owner = col.owner
+            and     con.constraint_name = col.constraint_name
+            and con.table_name = col.table_name
+            order by
+                col.position;
+
+        con_rec con%rowtype;
+
+    begin
+        -- Detail the primary/unique constraint that is referenced
+        utl_out(lpad('References: ',20)||
+             r_owner||'.'||r_constraint_name);
+
+        open con(r_owner,r_constraint_name);
+
+        loop
+
+           fetch con into con_rec;
+           exit when con%notfound;
+
+           if con_rec.position = 1 then
+              -- Tell them the name of the table referenced
+              -- The owner is the same as the owner of the
+              -- referenced constraint.
+              utl_out(lpad('Table: ',20)||r_owner||'.'||
+                  con_rec.table_name);
+              dt_table_space(r_owner,con_rec.table_name,'TABLE');
+           end if;
+
+           -- Tell them the column details
+           if con_rec.position = 1 then
+           utl_out(lpad('Ref Col: ',20)||
+                rpad(con_rec.column_name,30)||'  Position: '||
+                to_char(con_rec.position));
+           else
+           utl_out(lpad(' ',20)||
+                rpad(con_rec.column_name,30)||
+                '            '||
+                to_char(con_rec.position));
+           end if;
+
+        end loop;
+
+        close con;
+
+    end dt_fk_ref;
+
+
+
+/* dt_package_procedures */
+
+    procedure dt_package_procedures
+    as
+        cursor proc is
+            select
+                distinct procedure$ proc
+            from
+                sys.argument$ arg,
+                dba_objects obj
+            where
+                arg.obj# = obj.object_id
+            and object_name = g_table_name
+            and owner = g_user_name;
+
+    begin
+
+        utl_dash;
+        utl_out('Procedures');
+        utl_dash;
+
+        -- Get procedure names in a loop
+        for rec in proc loop
+            utl_out(rec.proc);
+        end loop;
+
+    end dt_package_procedures;
+
+
+
+/* dt_primary   Describe Primary Key Constraints */
+
+    procedure dt_primary
+    as
+        -- Here is an example of an explicit cursor with parameters
+        -- We open the cursor once for the primary keys
+        -- and again for the foreign keys
+        --
+        -- We return two columns, r_owner and r_constraint_name which
+        -- are used when we use the cursor for foreign keys but not
+        -- needed for primary keys.  Maybe we should have defined
+        -- separate cursors but the decision was made to leave it as
+        -- is to show the use of cursors with parameters
+        cursor pri (cons_type varchar2) is
+            select  con.constraint_name,
+                con.r_owner,
+                con.r_constraint_name,
+                con.owner,
+                con.status,
+                con.delete_rule,
+                con.table_name,
+                con.search_condition
+            from    sys.dba_constraints con
+            where   con.table_name = g_table_name
+            and con.owner = g_user_name
+            and con.constraint_type = cons_type;
+
+        pri_rec pri%rowtype;
+        v_text varchar(80);
+        num_com_lines   number(4);
+
+    begin
+        -- Output the constraints heading, we always show it because
+        -- we want to highlight and encourage the definition of
+        -- at least the referential constraints
+           utl_dash;                -- Output line of dashes
+           utl_out('Constraints');
+           utl_dash;
+           v_text := '       Primary Key: ';
+
+        -- ************************************************************
+        -- PRIMARY KEYS
+        -- ************************************************************
+        -- Open the cursor for the primary keys
+        open pri('P');
+
+        -- Here we only need to fetch once because we can
+        -- only have a single primary key per table
+        fetch pri into pri_rec;
+        if pri%found then
+              v_text := v_text||pri_rec.owner||'.'||
+                pri_rec.constraint_name;
+              utl_out(v_text);
+              utl_out('            Status: '||pri_rec.status);
+              dt_cons_cols(pri_rec.owner,pri_rec.constraint_name,
+                    pri_rec.table_name);
+              -- Show all tables referenced by this primary key
+              utl_ref_tab(pri_rec.owner,pri_rec.constraint_name);
+              utl_out(' ');     -- Blank line, looks better
+        else
+            -- Tell them there were no primary key constraints
+            --
+            v_text := v_text||'NONE FOUND';
+            utl_out(v_text);
+        end if;
+
+        -- Here we need to loop around in a procedure getting
+        -- all the columns referenced by this constraint
+
+        close pri;
+
+        -- ************************************************************
+        -- FOREIGN KEYS
+        -- ************************************************************
+        -- Open the cursor for the foreign keys
+        open pri('R');
+
+        loop
+            -- Get the next foreign key constraint record
+            --
+            fetch pri into pri_rec;
+            exit when pri%notfound;
+
+            -- On each record, we output the name and blank line
+            -- Bug Fix for v1.0d, Tony Lee Obermeit, 11th November,
+            -- 1994.  Cosmetic fix, moved "Deletes:" heading one
+            -- character to the right.
+            utl_out(lpad('Foreign Key: ',20)||
+                pri_rec.owner||'.'||pri_rec.constraint_name);
+            utl_out('            Status: '||pri_rec.status||
+                lpad('Deletes: ',35)||pri_rec.delete_rule);
+            dt_cons_cols(pri_rec.owner,pri_rec.constraint_name,
+                        pri_rec.table_name);
+            dt_fk_ref(pri_rec.r_owner,pri_rec.r_constraint_name);
+            utl_out(' ');
+        end loop;
+
+        if pri%rowcount = 0 then
+           -- Tell them there were no foreign key constraints
+           --
+           utl_out('       Foreign Key: NONE FOUND');
+        end if;
+
+        close pri;
+
+        -- ************************************************************
+        -- UNIQUE CONSTRAINTS
+        -- ************************************************************
+        -- Open the cursor for the unique constraints
+        open pri('U');
+
+        loop
+            -- Get the next unique constraint record
+            --
+            fetch pri into pri_rec;
+            exit when pri%notfound;
+
+            -- On each record, we output the name and blank line
+            utl_out(lpad('Unique: ',20)||
+                pri_rec.owner||'.'||pri_rec.constraint_name);
+            utl_out('            Status: '||pri_rec.status);
+            dt_cons_cols(pri_rec.owner,pri_rec.constraint_name,
+                        pri_rec.table_name);
+            -- Show all tables referenced by this unique key
+            utl_ref_tab(pri_rec.owner,pri_rec.constraint_name);
+            utl_out(' ');
+        end loop;
+
+        if pri%rowcount = 0 then
+           -- Tell them there were no unique constraints
+           --
+           utl_out('            Unique: NONE FOUND');
+        end if;
+
+        close pri;
+
+        -- ************************************************************
+        -- CHECK CONSTRAINTS
+        -- ************************************************************
+        -- Open the cursor for the check constraints
+        open pri('C');
+
+        loop
+            -- Get the next check constraint record
+            --
+            fetch pri into pri_rec;
+            exit when pri%notfound;
+
+                        -- Skip if a NOT NULL constraint
+                        -- This IF and the corresponding END IF line are the
+                        -- only changes made to version 1.0j
+                        if pri_rec.search_condition not like '%IS NOT NULL' then
+                            -- On each record, we output the name and blank line
+                            utl_out(lpad('Check: ',20)||
+                                    pri_rec.owner||'.'||pri_rec.constraint_name);
+                            utl_out('            Status: '||pri_rec.status);
+                            utl_wrap(pri_rec.search_condition,58,num_com_lines);
+                            for i in 1 .. num_com_lines
+                            loop
+                                    if i = 1 then
+                                       utl_out(lpad('Condition: ',20)||
+                                               g_desc_tab(i));
+                                    else
+                                       utl_out(lpad(' ',20)||g_desc_tab(i));
+                                    end if;
+                            end loop;
+                            utl_out(' ');
+                        end if;
+        end loop;
+
+        if pri%rowcount = 0 then
+           -- Tell them there were no check constraints
+           --
+           utl_out('             Check: NONE FOUND');
+        end if;
+
+        close pri;
+
+    end dt_primary;
+
+
+
+/* dt       Describe Table Procedure */
+
+    procedure dt
+        (table_name varchar2)
+    as
+    begin
+        dt_setup(table_name);
+        dt_head;
+        g_synonym_to_resolve := TRUE;
+        while g_synonym_to_resolve
+        loop
+            dt_syn;
+        end loop;
+        dt_object;
+
+        if g_object_exists and g_object_type <> 'PACKAGE' then
+            dt_table_space(g_user_name,g_table_name,'TABLE');
+            dt_tab_comments;
+            dt_col;
+            dt_index;
+        end if;
+
+        if g_object_exists and g_object_type = 'PACKAGE' then
+            null;
+            dt_package_procedures;
+        end if;
+
+        utl_dash;
+        dt_foot;
+
+    end  dt;
+
+
+
+/* dtl      Describe Table Long Procedure */
+
+    procedure dtl
+        (table_name varchar2)
+    as
+    begin
+        dt_setup(table_name);
+        dt_head;
+        g_synonym_to_resolve := TRUE;
+        while g_synonym_to_resolve
+        loop
+            dt_syn;
+        end loop;
+        dt_object;
+        if g_object_exists and g_object_type <> 'PACKAGE' then
+            dt_table_space(g_user_name,g_table_name,'TABLE');
+                        dt_table_storage(g_user_name,g_table_name,'TABLE');
+            dt_tab_comments;
+            dt_col;
+            dt_col_defaults;
+            dt_index;
+            dt_primary;
+            dt_trigger;
+        end if;
+
+        if g_object_exists and g_object_type = 'PACKAGE' then
+            null;
+            dt_package_procedures;
+        end if;
+
+        utl_dash;
+        dt_foot;
+    end dtl;
+
+/* dtls     Describe Table Long (with) Statistics Procedure */
+
+    procedure dtls
+        (table_name varchar2)
+    as
+    begin
+        dt_setup(table_name);
+        dt_head;
+        g_synonym_to_resolve := TRUE;
+        while g_synonym_to_resolve
+        loop
+            dt_syn;
+        end loop;
+        dt_object;
+        if g_object_exists and g_object_type <> 'PACKAGE' then
+            dt_table_space(g_user_name,g_table_name,'TABLE');
+                        dt_table_storage(g_user_name,g_table_name,'TABLE');
+                        dt_table_statistics(g_user_name,g_table_name);
+            dt_tab_comments;
+            dt_col;
+            dt_col_defaults;
+            dt_index;
+            dt_primary;
+            dt_trigger;
+        end if;
+
+        if g_object_exists and g_object_type = 'PACKAGE' then
+            null;
+            dt_package_procedures;
+        end if;
+
+        utl_dash;
+        dt_foot;
+    end dtls;
+
+end pack_dm_utl;
+/
+
